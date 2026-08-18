@@ -5,13 +5,13 @@ services:
     ports:
       - "${SIDECAR_PORT:-3169}:3107"
     environment:
-      SIDECAR_PUBLIC_URL: ${SIDECAR_PUBLIC_URL:-http://92.4.161.181:3169}
+      SIDECAR_PUBLIC_URL: ${SIDECAR_PUBLIC_URL:-http://1.1.1.1:3169}
       SIDECAR_CACHE_DIR: /app/data
       SIDECAR_SESSION_TTL: ${SIDECAR_SESSION_TTL:-21600}
       SIDECAR_FIXED_TOKEN: ${SIDECAR_FIXED_TOKEN:-}
       SIDECAR_BOOTSTRAP_KEY: ${SIDECAR_BOOTSTRAP_KEY:-}
       SIDECAR_AUDIO_PROXY: ${SIDECAR_AUDIO_PROXY:-}
-      OFFSET_API_URL: ${OFFSET_API_URL:-https://noprox.stremio-italia.eu/dual/offset}
+      OFFSET_API_URL: ${OFFSET_API_URL:-https://toastflix.stremio-italia.eu/dual/offset}
       OFFSET_API_TOKEN: ${OFFSET_API_TOKEN:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
     volumes:
