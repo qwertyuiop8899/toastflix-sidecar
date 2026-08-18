@@ -96,7 +96,9 @@ class SyncEngine:
         local_seek = max(0.0, position - metadata["starts"][first])
         selected = range(first, min(len(metadata["segs"]), index + 5))
         iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
-        lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD", f'#EXT-X-KEY:METHOD=AES-128,URI="audio.key"{iv}']
+        lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD",
+                 f"#EXT-X-TARGETDURATION:{int(max(metadata['durs'][item] for item in selected)) + 1}",
+                 f'#EXT-X-KEY:METHOD=AES-128,URI="audio.key"{iv}']
         (directory / "audio.key").write_bytes((self.audio._dir(hid) / "enc.key").read_bytes())
         for number, item in enumerate(selected):
             name = f"audio-{number}.ts"
@@ -109,9 +111,9 @@ class SyncEngine:
 
     @staticmethod
     async def _pcm(playlist: Path, seek: float, output: Path, audio_map: bool = True):
-        command = ["ffmpeg", "-v", "error", "-allowed_extensions", "ALL", "-protocol_whitelist", "file,crypto", "-ss", f"{max(0.0, seek):.3f}", "-i", str(playlist), "-t", "20"]
+        command = ["ffmpeg", "-v", "error", "-allowed_extensions", "ALL", "-protocol_whitelist", "file,crypto", "-i", str(playlist), "-ss", f"{max(0.0, seek):.3f}", "-t", "20"]
         if audio_map:
-            command += ["-map", "0:a:0"]
+            command += ["-map", "0:a:0", "-vn"]
         command += ["-ac", "1", "-ar", "8000", "-f", "s16le", "-y", str(output)]
         process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         _, error = await asyncio.wait_for(process.communicate(), timeout=60)
@@ -170,9 +172,12 @@ class SyncEngine:
         metadata = self.audio.metadata(audio_hid)
         audio_fp = str(payload.get("audio_fingerprint") or metadata.get("source_fingerprint") or "")
         cache_key = self.offsets.key(media_key, resolution, video_fp, audio_fp)
+        payload["cache_key"] = cache_key
         lookup = await self.offsets.lookup({"cache_key": cache_key, "media_key": media_key, "resolution": resolution, "video_fingerprint": video_fp, "audio_fingerprint": audio_fp, "vpsAccess": payload.get("vpsAccess", "")})
         if lookup:
-            return {"status": "ok", "cached": True, **(lookup.get("details") or lookup)}
+            result = {"status": "ok", "cached": True, **(lookup.get("details") or lookup)}
+            result["cache_key"] = cache_key
+            return result
         video_entries, _ = await self._video_entries(video_url, video_headers)
         video_duration = sum(item["duration"] for item in video_entries)
         audio_duration = sum(metadata["durs"])
