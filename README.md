@@ -179,7 +179,7 @@ Se vuoi salvare e recuperare gli offset anche dalla VPS ToastFlix, imposta nel
 `.env`:
 
 ```env
-OFFSET_API_URL=https://noprox.stremio-italia.eu/dual/offset
+OFFSET_API_URL=https://toastflix.stremio-italia.eu/dual/offset
 ```
 
 Il sidecar invia alla VPS solo metadati:
