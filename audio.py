@@ -228,6 +228,7 @@ class AudioStore:
                 iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
                 (work / "input.m3u8").write_text(
                     "#EXTM3U\n#EXT-X-VERSION:3\n"
+                    f"#EXT-X-TARGETDURATION:{int(metadata['durs'][index]) + 1}\n"
                     f"#EXT-X-KEY:METHOD=AES-128,URI=\"enc.key\"{iv}\n"
                     f"#EXTINF:{metadata['durs'][index]:.6f},\nsrc.ts\n#EXT-X-ENDLIST\n"
                 )
