@@ -1,113 +1,165 @@
-# Toast Audio Sidecar
+# ToastFlix Audio Sidecar
 
-Standalone audio-only sidecar for ToastFlix DUAL playback.
+Questo servizio gestisce solo l'audio del DUAL ToastFlix.
 
-The video path is not handled here. The existing ToastFlix VPS continues to
-serve the DUAL video playlist, and Stremio's local proxy continues to fetch the
-video segments. This service handles only vixsrc audio playlist registration,
-TS-to-fMP4 transmuxing, local audio caching, and optional offset reporting.
+- Il video continua a passare dal proxy locale di Stremio.
+- Il browser dell'utente recupera da vixsrc playlist, token e chiave audio.
+- Il sidecar scarica i segmenti audio gia' autorizzati, usa `ffmpeg` e serve l'audio convertito.
+- Se `dualAudioHost` non viene configurato in ToastFlix, il sidecar non viene usato.
 
-The image is standalone: it uses direct network egress by default and does not
-require WARP, a ToastFlix Docker network, or any other container on the host.
-Set `SIDECAR_AUDIO_PROXY` only when the sidecar's own public IP cannot reach the
-audio CDN.
+## Pubblicare Su GHCR
 
-## Modes
+GHCR significa GitHub Container Registry. L'immagine viene costruita da GitHub
+Actions e pubblicata su:
 
-- `dualAudioHost` absent: the existing ToastFlix VPS audio path is used.
-- `dualAudioHost` set to this service: audio is downloaded and served here.
-- The URL may be local, LAN, or remote. It must be reachable by the Stremio
-  client, not merely by the VPS.
+```text
+ghcr.io/qwertyuiop8899/toastflix-sidecar:latest
+```
 
-The integration into `toast-stream-develop` is intentionally not included in
-this folder yet. This repository is the sidecar implementation and contract.
+### 1. Creare il workflow GitHub
 
-## Session Tokens
+Nel repository GitHub `qwertyuiop8899/toastflix-sidecar`:
 
-No token is placed in the user's media configuration.
+1. Apri `Actions`.
+2. Premi `New workflow`.
+3. Premi `set up a workflow yourself`.
+4. Incolla questo contenuto.
+5. Salva il file come `.github/workflows/publish-ghcr.yml` sul branch `main`.
 
-1. The integration requests `POST /session`.
-2. The sidecar generates a random short-lived token.
-3. The integration sends that token as `Authorization: Bearer <token>` or as
-   the `t` query parameter on subsequent audio requests.
+```yaml
+name: Pubblica immagine GHCR
 
-For unattended private deployments, `SIDECAR_FIXED_TOKEN` can be set. It is an
-operator setting, not a user-facing media setting. `SIDECAR_BOOTSTRAP_KEY`, when
-set, protects session creation.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-## Run Locally
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e pubblica
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/toastflix-sidecar:latest
+            ghcr.io/${{ github.repository_owner }}/toastflix-sidecar:sha-${{ github.sha }}
+```
+
+6. Vai in `Actions` e aspetta che il workflow finisca con successo.
+7. Controlla il pacchetto nella sezione `Packages` del profilo GitHub.
+
+Alla prima pubblicazione il pacchetto puo' essere privato. Se vuoi usarlo da
+un server senza login, apri le impostazioni del pacchetto GHCR e imposta
+`visibility: Public`.
+
+## Installare Su Una Macchina
+
+Requisiti:
+
+- Docker;
+- Docker Compose;
+- porta TCP `3169` raggiungibile dal dispositivo che usa Stremio.
+
+Clona il repository:
 
 ```bash
+git clone https://github.com/qwertyuiop8899/toastflix-sidecar.git
+cd toastflix-sidecar
 cp .env.example .env
-docker compose up --build
-curl http://127.0.0.1:3169/health
 ```
 
-The default local URL is `http://127.0.0.1:3169`. For a LAN or remote sidecar,
-set `SIDECAR_PUBLIC_URL` to the URL visible from the playback device and put
-the service behind HTTPS/authenticated network access.
-
-## Publish The Image
-
-Build and publish to Docker Hub:
-
-```bash
-docker login
-docker build -t YOUR_DOCKERHUB_USER/toast-audio-sidecar:latest .
-docker push YOUR_DOCKERHUB_USER/toast-audio-sidecar:latest
-```
-
-Build and publish to GitHub Container Registry:
-
-```bash
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
-docker build -t ghcr.io/YOUR_GITHUB_USER/toast-audio-sidecar:latest .
-docker push ghcr.io/YOUR_GITHUB_USER/toast-audio-sidecar:latest
-```
-
-## Run With Compose
-
-To use a published image, replace `build: .` in `compose.yml` with:
-
-```yaml
-image: YOUR_DOCKERHUB_USER/toast-audio-sidecar:latest
-```
-
-Or, for GHCR:
-
-```yaml
-image: ghcr.io/YOUR_GITHUB_USER/toast-audio-sidecar:latest
-```
-
-Configure the public address in `.env`:
+Nel file `.env` imposta l'indirizzo pubblico della macchina:
 
 ```env
-SIDECAR_PUBLIC_URL=http://YOUR_SERVER_IP:3169
+SIDECAR_PUBLIC_URL=http://IP_DELLA_MACCHINA:3169
 SIDECAR_PORT=3169
 SIDECAR_AUDIO_PROXY=
 ```
 
-Start it:
+`SIDECAR_AUDIO_PROXY` deve restare vuoto. Il sidecar usa direttamente la
+connessione Internet della macchina e non dipende da WARP o da ToastFlix.
+
+Per una macchina esposta su Internet usa preferibilmente HTTPS:
+
+```env
+SIDECAR_PUBLIC_URL=https://audio.example.com
+```
+
+Avvia usando l'immagine pubblicata su GHCR. Nel `compose.yml`, sostituisci:
+
+```yaml
+build: .
+```
+
+con:
+
+```yaml
+image: ghcr.io/qwertyuiop8899/toastflix-sidecar:latest
+```
+
+Poi esegui:
 
 ```bash
-cp .env.example .env
-docker login
 docker compose pull
 docker compose up -d
-docker compose logs -f
 ```
 
-Verify it:
+Controlla lo stato:
 
 ```bash
-curl http://YOUR_SERVER_IP:3169/health
+docker compose ps
+docker compose logs -f
+curl http://IP_DELLA_MACCHINA:3169/health
 ```
 
-The URL entered in ToastFlix's `Server audio DUAL` field must be reachable by
-the playback device. For public use, prefer an HTTPS URL such as
-`https://audio.example.com`.
+La risposta corretta e' simile a:
 
-## Run With Docker
+```json
+{"status":"ok","service":"toast-audio-sidecar"}
+```
+
+## Collegarlo A ToastFlix
+
+Apri la configurazione di ToastFlix e attiva `FHD / 4K Remuxed`.
+
+Nel campo `Server audio DUAL` inserisci solo l'indirizzo del sidecar:
+
+```text
+http://IP_DELLA_MACCHINA:3169
+```
+
+Oppure, se usi HTTPS:
+
+```text
+https://audio.example.com
+```
+
+Il campo audio resta disabilitato quando `FHD / 4K Remuxed` e' spento.
+
+Non devi inserire token nella configurazione: il sidecar crea automaticamente
+un token temporaneo per ogni sessione.
+
+## Avvio Diretto Senza Compose
+
+Se preferisci usare Docker direttamente:
 
 ```bash
 docker run -d \
@@ -116,60 +168,40 @@ docker run -d \
   -p 3169:3107 \
   --env-file .env \
   -v toast-audio-data:/app/data \
-  YOUR_DOCKERHUB_USER/toast-audio-sidecar:latest
+  ghcr.io/qwertyuiop8899/toastflix-sidecar:latest
 ```
 
-For GHCR, replace the image name with:
+## Offset Audio
 
-```text
-ghcr.io/YOUR_GITHUB_USER/toast-audio-sidecar:latest
+Il sidecar mantiene una cache offset locale.
+
+Se vuoi salvare e recuperare gli offset anche dalla VPS ToastFlix, imposta nel
+`.env`:
+
+```env
+OFFSET_API_URL=https://noprox.stremio-italia.eu/dual/offset
 ```
 
-## API Contract
+Il sidecar invia alla VPS solo metadati:
 
-```text
-POST /session
-POST /dual/aprep
-POST /dual/acache
-GET  /dual/aud/{hid}/audio.m3u8
-GET  /dual/aud/{hid}/init.mp4
-GET  /dual/aud/{hid}/s{idx}.m4s
-POST /offset/lookup
-POST /offset/report
-POST /sync
-GET  /health
+- titolo e risoluzione;
+- fingerprint video/audio;
+- offset, rate e confidence.
+
+Non invia alla VPS segmenti audio, chiavi AES o file convertiti.
+
+## Aggiornare L'immagine
+
+Quando aggiorni il codice su GitHub:
+
+```bash
+docker compose pull
+docker compose up -d
 ```
 
-`/dual/aprep` receives the audio playlist and AES key from the browser because
-the vixsrc token is IP-bound. The sidecar validates public HTTPS URLs, stores
-the key only in its local cache, and never receives video data.
+Controlla poi:
 
-## Offset Cache
-
-The sidecar stores offsets locally in `data/offsets.db`. If `OFFSET_API_URL` is
-configured, it first asks the central service for a matching fingerprint and
-reports newly measured results back to it. Only metadata is reported:
-
-- media key;
-- resolution;
-- video fingerprint;
-- audio fingerprint;
-- offset, rate, confidence, and measurements.
-
-Audio segments, AES keys, and fMP4 fragments are never sent to the central
-offset API.
-
-## Security
-
-- Session tokens expire automatically.
-- Audio URLs must be HTTPS public URLs by default.
-- Local/private/link-local hostnames and private IP addresses are rejected.
-- Redirects are checked again before following.
-- Arbitrary video URLs are not accepted by this service.
-
-## Integration
-
-The main addon accepts this service through `dualAudioHost`. Without that
-setting it keeps the VPS audio path. The sidecar can be hosted on any machine
-reachable by the playback device; its vixsrc input comes from the browser's
-IP-bound playlist and key, not from a new server-side vixsrc login.
+```bash
+docker compose logs --tail=100
+curl http://IP_DELLA_MACCHINA:3169/health
+```
