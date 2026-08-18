@@ -89,7 +89,7 @@ cp .env.example .env
 Nel file `.env` imposta l'indirizzo pubblico della macchina:
 
 ```env
-SIDECAR_PUBLIC_URL=http://IP_DELLA_MACCHINA:3169
+SIDECAR_PUBLIC_URL=https://audio.example.com
 SIDECAR_PORT=3169
 SIDECAR_AUDIO_PROXY=
 ```
@@ -97,7 +97,8 @@ SIDECAR_AUDIO_PROXY=
 `SIDECAR_AUDIO_PROXY` deve restare vuoto. Il sidecar usa direttamente la
 connessione Internet della macchina e non dipende da WARP o da ToastFlix.
 
-Per una macchina esposta su Internet usa preferibilmente HTTPS:
+`SIDECAR_PUBLIC_URL` deve essere un URL pubblico HTTPS con certificato valido.
+HTTP non e' supportato per il collegamento con Stremio.
 
 ```env
 SIDECAR_PUBLIC_URL=https://audio.example.com
@@ -127,7 +128,7 @@ Controlla lo stato:
 ```bash
 docker compose ps
 docker compose logs -f
-curl http://IP_DELLA_MACCHINA:3169/health
+curl https://audio.example.com/health
 ```
 
 La risposta corretta e' simile a:
@@ -143,16 +144,10 @@ Apri la configurazione di ToastFlix e attiva `FHD / 4K Remuxed`.
 Nel campo `Server audio DUAL` inserisci solo l'indirizzo del sidecar:
 
 ```text
-http://IP_DELLA_MACCHINA:3169
-```
-
-Oppure, se usi HTTPS:
-
-```text
 https://audio.example.com
 ```
 
-Il campo audio resta disabilitato quando `FHD / 4K Remuxed` e' spento.
+Il campo deve usare HTTPS e resta disabilitato quando `FHD / 4K Remuxed` e' spento.
 
 Non devi inserire token nella configurazione: il sidecar crea automaticamente
 un token temporaneo per ogni sessione.
@@ -175,11 +170,11 @@ docker run -d \
 
 Il sidecar mantiene una cache offset locale.
 
-Se vuoi salvare e recuperare gli offset anche dalla VPS ToastFlix, imposta nel
+Se vuoi salvare e recuperare gli offset anche da un server centrale ToastFlix, imposta nel
 `.env`:
 
 ```env
-OFFSET_API_URL=https://toastflix.stremio-italia.eu/dual/offset
+OFFSET_API_URL=https://YOUR_TOASTFLIX_HOST/dual/offset
 ```
 
 Il sidecar invia alla VPS solo metadati:
