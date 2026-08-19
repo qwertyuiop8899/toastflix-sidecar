@@ -76,7 +76,76 @@ Requisiti:
 
 - Docker;
 - Docker Compose;
-- porta TCP `3169` raggiungibile dal dispositivo che usa Stremio.
+- un hostname DNS pubblico che punti alla macchina;
+- porte TCP `80` e `443` raggiungibili per il reverse proxy e il certificato TLS;
+- la porta interna del sidecar (`3169` sull'host) raggiungibile dal reverse proxy.
+
+## Hostname Pubblico HTTPS Obbligatorio
+
+`dualAudioHost` deve essere un hostname DNS pubblico raggiungibile dal dispositivo
+che usa Stremio e deve usare HTTPS con un certificato valido. Sono validi anche i
+nomi gratuiti DuckDNS.
+
+Non usare:
+
+- `http://127.0.0.1:3169` o `http://localhost:3169`;
+- un indirizzo IP privato o un hostname SSH della VPS;
+- un URL HTTP senza certificato TLS.
+
+### Esempio DuckDNS
+
+1. Crea un sottodominio, per esempio `toast-audio.duckdns.org`, nel pannello DuckDNS.
+2. Imposta l'indirizzo IP pubblico della macchina. Se l'IP cambia, configura il
+   client di aggiornamento DuckDNS sulla macchina. Non salvare il token DuckDNS
+   nel repository.
+3. Configura un reverse proxy che riceva il traffico HTTPS e inoltri al sidecar
+   locale sulla porta `3169`.
+
+Con Caddy, crea un blocco simile in `/etc/caddy/Caddyfile`:
+
+```caddyfile
+toast-audio.duckdns.org {
+    reverse_proxy 127.0.0.1:3169
+}
+```
+
+Caddy richiede che le porte `80` e `443` siano aperte e ottiene/rinnova
+automaticamente il certificato. Riavvia poi Caddy e verifica:
+
+```bash
+sudo systemctl reload caddy
+curl https://toast-audio.duckdns.org/health
+```
+
+Con Nginx, usa inizialmente un virtual host HTTP per la verifica DNS:
+
+```nginx
+server {
+    listen 80;
+    server_name toast-audio.duckdns.org;
+
+    location / {
+        proxy_pass http://127.0.0.1:3169;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Dopo aver verificato che il nome punti alla macchina, abilita HTTPS con Certbot:
+
+```bash
+sudo certbot --nginx -d toast-audio.duckdns.org
+curl https://toast-audio.duckdns.org/health
+```
+
+Nel file `.env` del sidecar usa sempre l'URL HTTPS pubblico, non l'indirizzo
+locale:
+
+```env
+SIDECAR_PUBLIC_URL=https://toast-audio.duckdns.org
+```
 
 Clona il repository:
 
