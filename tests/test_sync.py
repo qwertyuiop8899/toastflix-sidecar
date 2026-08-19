@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -49,6 +50,93 @@ class FakeOffsets:
 
 
 class SyncPlaylistTests(unittest.IsolatedAsyncioTestCase):
+    def test_cached_audio_requires_fresh_signed_segments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audio = AudioStore(str(root))
+            fresh = int(time.time()) + 3600
+            stale = int(time.time()) - 1
+            base = root / ("a" * 16)
+            base.mkdir()
+            self.assertTrue(audio._cache_is_fresh({
+                "segs": [f"https://cdn.example.test/0.ts?expires={fresh}"],
+            }))
+            self.assertFalse(audio._cache_is_fresh({
+                "segs": [f"https://cdn.example.test/0.ts?expires={stale}"],
+            }))
+            self.assertFalse(audio._cache_is_fresh({
+                "segs": ["https://cdn.example.test/0.ts"],
+            }))
+
+    async def test_measure_accepts_reference_audio_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = FakeAudio(Path(directory))
+            offsets = FakeOffsets()
+            offsets.lookup = AsyncMock(return_value=None)
+            engine = SyncEngine(audio, offsets)
+            audio.metadata = lambda hid: {
+                "durs": [100.0],
+                "starts": [0.0],
+            }
+            engine._video_entries = AsyncMock(return_value=(
+                [{"url": "https://cdn.example.test/video.m4s", "duration": 100.0, "start": 0.0}],
+                None,
+            ))
+            engine._decode_reference_audio = AsyncMock(return_value=(Path(directory) / "reference.m3u8", 0.0, 100.0))
+            engine._media_start_time = AsyncMock(return_value=0.0)
+            engine._decode_audio = AsyncMock(return_value=(Path(directory) / "audio.m3u8", 0.0, 100.0))
+            engine._pcm = AsyncMock()
+            engine._envelope = lambda path: [0.0] * 500
+            payload = {
+                "media_key": "movie:reference:0:0",
+                "resolution": 1080,
+                "video_url": "https://video.example.test/video.m3u8",
+                "reference_audio_url": "https://audio.example.test/reference.m3u8",
+                "video_fingerprint": "video-fp",
+                "audio_fingerprint": "audio-fp",
+                "audio_hid": audio.hid,
+            }
+
+            result = await engine.measure(payload)
+
+            self.assertEqual(result["status"], "incompatible")
+            engine._decode_reference_audio.assert_awaited()
+            engine._decode_video = AsyncMock(side_effect=AssertionError("video stream should not be decoded"))
+
+    async def test_reference_audio_offset_includes_video_start_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = FakeAudio(Path(directory))
+            offsets = FakeOffsets()
+            offsets.lookup = AsyncMock(return_value=None)
+            engine = SyncEngine(audio, offsets)
+            audio.metadata = lambda hid: {"durs": [100.0], "starts": [0.0]}
+            engine._video_entries = AsyncMock(return_value=(
+                [{"url": "https://video.example.test/0.m4s", "duration": 100.0, "start": 0.0}],
+                None,
+            ))
+            engine._media_start_time = AsyncMock(return_value=10.125)
+            engine._decode_reference_audio = AsyncMock(return_value=(Path(directory) / "reference.m3u8", 0.0, 100.0))
+            engine._decode_audio = AsyncMock(return_value=(Path(directory) / "audio.m3u8", 0.0, 100.0))
+            engine._pcm = AsyncMock()
+            engine._envelope = lambda path: [0.0] * 500
+            engine._lag = lambda reference, candidate: (0.0, 0.9)
+            payload = {
+                "media_key": "movie:video-start:0:0",
+                "resolution": 2160,
+                "video_url": "https://video.example.test/video.m3u8",
+                "reference_audio_url": "https://audio.example.test/reference.m3u8",
+                "video_fingerprint": "video-fp",
+                "audio_fingerprint": "audio-fp",
+                "audio_hid": audio.hid,
+            }
+
+            result = await engine.measure(payload)
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["offset"], 10.125)
+            self.assertEqual(result["video_start_time"], 10.125)
+            engine._media_start_time.assert_awaited_once()
+
     async def test_fragment_input_playlist_declares_target_duration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
