@@ -1,6 +1,8 @@
 import asyncio
 import math
 import os
+import re
+import shutil
 import statistics
 import tempfile
 from array import array
@@ -27,8 +29,11 @@ class SyncEngine:
         kwargs = {"timeout": 30, "follow_redirects": False}
         if self.proxy:
             kwargs["proxy"] = self.proxy
-        async with httpx.AsyncClient(**kwargs) as client:
-            response = await client.get(url, headers=headers)
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                response = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"media fetch failed: {exc}") from exc
         if response.status_code in (301, 302, 307, 308):
             location = response.headers.get("location", "")
             if not await resolves_publicly(urljoin(url, location)):
@@ -65,17 +70,24 @@ class SyncEngine:
         response = await self._get(url, headers)
         path.write_bytes(response.content)
 
-    async def _decode_video(self, url: str, headers: dict, position: float, directory: Path):
-        _, entries, map_url = (url, *await self._video_entries(url, headers))
-        target = next((i for i, item in enumerate(entries) if item["start"] <= position < item["start"] + item["duration"]), len(entries) - 1)
+    @staticmethod
+    def _sample_entries(entries, position: float):
+        target = next((i for i, item in enumerate(entries)
+                       if item["start"] <= position < item["start"] + item["duration"]),
+                      len(entries) - 1)
         first = max(0, target - 1)
         local_seek = max(0.0, position - entries[first]["start"])
         selected, available = [], 0.0
         for item in entries[first:]:
             selected.append(item)
             available += item["duration"]
-            if available >= local_seek + self.sample_seconds + 5:
+            if available >= local_seek + 25.0:
                 break
+        return selected, local_seek, sum(item["duration"] for item in entries)
+
+    async def _decode_video(self, url: str, headers: dict, position: float, directory: Path):
+        _, entries, map_url = (url, *await self._video_entries(url, headers))
+        selected, local_seek, duration = self._sample_entries(entries, position)
         lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-PLAYLIST-TYPE:VOD", f"#EXT-X-TARGETDURATION:{int(max(x['duration'] for x in selected)) + 1}"]
         if map_url:
             await self._download(map_url, directory / "video-init.mp4", headers)
@@ -87,7 +99,61 @@ class SyncEngine:
         lines.append("#EXT-X-ENDLIST")
         playlist = directory / "video.m3u8"
         playlist.write_text("\n".join(lines) + "\n")
-        return playlist, local_seek, sum(item["duration"] for item in entries)
+        return playlist, local_seek, duration
+
+    async def _decode_reference_audio(self, url: str, headers: dict, position: float, directory: Path):
+        response = await self._get(url, headers)
+        entries, map_url = self._playlist(response.text, url)
+        selected, local_seek, duration = self._sample_entries(entries, position)
+        lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-PLAYLIST-TYPE:VOD",
+                 f"#EXT-X-TARGETDURATION:{int(max(item['duration'] for item in selected)) + 1}"]
+        key_line = next((line.strip() for line in response.text.splitlines()
+                         if line.strip().startswith("#EXT-X-KEY:")), "")
+        if key_line and "METHOD=NONE" not in key_line.upper():
+            key_match = re.search(r'URI="([^"]+)"', key_line)
+            if key_match:
+                key_response = await self._get(urljoin(url, key_match.group(1)), headers)
+                (directory / "reference.key").write_bytes(key_response.content)
+                key_line = re.sub(r'URI="[^"]+"', 'URI="reference.key"', key_line, count=1)
+            lines.append(key_line)
+        if map_url:
+            await self._download(map_url, directory / "reference-init.mp4", headers)
+            lines.append('#EXT-X-MAP:URI="reference-init.mp4"')
+        for number, item in enumerate(selected):
+            name = f"reference-{number}.m4s"
+            await self._download(item["url"], directory / name, headers)
+            lines += [f"#EXTINF:{item['duration']:.6f},", name]
+        lines.append("#EXT-X-ENDLIST")
+        playlist = directory / "reference.m3u8"
+        playlist.write_text("\n".join(lines) + "\n")
+        return playlist, local_seek, duration
+
+    async def _media_start_time(self, url: str, headers: dict) -> float:
+        """Read the initial timestamp of Cinejoy's video-only fMP4 stream."""
+        response = await self._get(url, headers)
+        match = re.search(r'#EXT-X-MAP:URI="([^"]+)"', response.text)
+        first = next((line.strip() for line in response.text.splitlines()
+                      if line.strip() and not line.startswith("#")), "")
+        if not match or not first:
+            return 0.0
+        init_response, segment_response = await asyncio.gather(
+            self._get(urljoin(url, match.group(1)), headers),
+            self._get(urljoin(url, first), headers),
+        )
+        root = Path(tempfile.mkdtemp(prefix="cinejoy-start-"))
+        try:
+            sample = root / "sample.mp4"
+            sample.write_bytes(init_response.content + segment_response.content)
+            process = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error", "-show_entries", "stream=start_time",
+                "-of", "default=nw=1:nk=1", str(sample),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=20)
+            values = output.decode(errors="replace").strip().splitlines()
+            return float(values[0]) if values else 0.0
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     async def _decode_audio(self, hid: str, position: float, directory: Path):
         metadata = self.audio.metadata(hid)
@@ -167,6 +233,9 @@ class SyncEngine:
         resolution = int(payload.get("resolution") or 0)
         video_url = str(payload.get("video_url") or "")
         video_headers = payload.get("video_headers") if isinstance(payload.get("video_headers"), dict) else {}
+        reference_audio_url = str(
+            payload.get("reference_audio_url") or payload.get("referenceAudio") or ""
+        ).strip()
         audio_hid = str(payload.get("audio_hid") or "")
         video_fp = str(payload.get("video_fingerprint") or "")
         metadata = self.audio.metadata(audio_hid)
@@ -176,12 +245,24 @@ class SyncEngine:
         lookup = await self.offsets.lookup({"cache_key": cache_key, "media_key": media_key, "resolution": resolution, "video_fingerprint": video_fp, "audio_fingerprint": audio_fp, "vpsAccess": payload.get("vpsAccess", "")})
         if lookup:
             result = {"status": "ok", "cached": True, **(lookup.get("details") or lookup)}
-            result["cache_key"] = cache_key
-            return result
+            if reference_audio_url and not result.get("video_start_time"):
+                lookup = None
+            else:
+                result["cache_key"] = cache_key
+                return result
         video_entries, _ = await self._video_entries(video_url, video_headers)
         video_duration = sum(item["duration"] for item in video_entries)
+        video_start_time = 0.0
+        if reference_audio_url:
+            video_start_time = await self._media_start_time(video_url, video_headers)
+        reference_duration = video_duration
+        if reference_audio_url:
+            reference_entries, _ = await self._video_entries(reference_audio_url, video_headers)
+            reference_duration = sum(item["duration"] for item in reference_entries)
+            if abs(reference_duration - video_duration) > 1.0:
+                raise ValueError("reference audio timeline mismatch")
         audio_duration = sum(metadata["durs"])
-        common = min(video_duration, audio_duration)
+        common = min(video_duration, reference_duration, audio_duration)
         if common < 90:
             raise ValueError("media too short")
         positions = sorted({min(60.0, common * .1), common * .5, max(30.0, common - 90.0)})
@@ -191,10 +272,24 @@ class SyncEngine:
             for index, position in enumerate(positions):
                 video_dir, audio_dir = root / f"video-{index}", root / f"audio-{index}"
                 video_dir.mkdir(), audio_dir.mkdir()
-                video_playlist, video_seek, _ = await self._decode_video(video_url, video_headers, position, video_dir)
+                if reference_audio_url:
+                    reference_playlist, reference_seek, _ = await self._decode_reference_audio(
+                        reference_audio_url, video_headers, position, video_dir
+                    )
+                else:
+                    reference_playlist, reference_seek, _ = await self._decode_video(
+                        video_url, video_headers, position, video_dir
+                    )
                 audio_playlist, audio_seek, _ = await self._decode_audio(audio_hid, position, audio_dir)
                 video_pcm, audio_pcm = root / f"video-{index}.pcm", root / f"audio-{index}.pcm"
-                await asyncio.gather(self._pcm(video_playlist, video_seek, video_pcm), self._pcm(audio_playlist, audio_seek, audio_pcm))
+                samples = await asyncio.gather(
+                    self._pcm(reference_playlist, reference_seek, video_pcm),
+                    self._pcm(audio_playlist, audio_seek, audio_pcm),
+                    return_exceptions=True,
+                )
+                failure = next((sample for sample in samples if isinstance(sample, BaseException)), None)
+                if failure is not None:
+                    raise RuntimeError(f"{type(failure).__name__}: {str(failure)[:260]}")
                 lag, correlation = self._lag(self._envelope(video_pcm), self._envelope(audio_pcm))
                 measurements.append({"position": position, "lag": lag, "offset": lag, "correlation": correlation})
         valid = [item for item in measurements if item["correlation"] >= .75]
@@ -203,6 +298,8 @@ class SyncEngine:
         else:
             measured = statistics.median(item["offset"] for item in valid)
             deviation = max(abs(item["offset"] - measured) for item in valid)
-            result = {"status": "ok" if deviation <= .25 else "incompatible", "offset": round(-measured, 3), "rate": 1.0, "confidence": min(item["correlation"] for item in valid), "deviation": deviation, "sync_mode": "constant", "video_duration": video_duration, "audio_duration": audio_duration, "measurements": measurements}
+            result = {"status": "ok" if deviation <= .25 else "incompatible", "offset": round(-measured + video_start_time, 3), "rate": 1.0, "confidence": min(item["correlation"] for item in valid), "deviation": deviation, "sync_mode": "constant", "video_duration": video_duration, "audio_duration": audio_duration, "measurements": measurements}
+            if reference_audio_url:
+                result["video_start_time"] = round(video_start_time, 3)
         result["cache_key"] = cache_key
         return result
