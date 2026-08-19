@@ -7,8 +7,9 @@ import re
 import shutil
 import struct
 import tempfile
+import time
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 
@@ -116,11 +117,27 @@ class AudioStore:
                 continue
             try:
                 metadata = self.metadata(directory.name)
-                if metadata.get("media_key") == media_key and metadata.get("language") in {language, "it" if language == "ita" else "en"}:
+                if (
+                    metadata.get("media_key") == media_key
+                    and metadata.get("language") in {language, "it" if language == "ita" else "en"}
+                    and self._cache_is_fresh(metadata)
+                ):
                     candidates.append((directory.stat().st_mtime, directory.name))
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
         return max(candidates)[1] if candidates else None
+
+    @staticmethod
+    def _cache_is_fresh(metadata: dict, safety_window: int = 60) -> bool:
+        """Do not reuse signed media URLs that are expired or nearly expired."""
+        expiries = []
+        for url in metadata.get("segs") or []:
+            query = parse_qs(urlparse(url).query)
+            value = (query.get("expires") or query.get("e") or [None])[0]
+            if not value or not str(value).isdigit():
+                return False
+            expiries.append(int(value))
+        return bool(expiries) and min(expiries) > time.time() + safety_window
 
     @staticmethod
     def timeline(metadata: dict, offset: float = 0.0, rate: float = 1.0):
